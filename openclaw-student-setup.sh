@@ -5,9 +5,9 @@
 # What this does:
 #   1. Makes your OpenClaw dashboard reachable over HTTPS via sslip.io + Caddy
 #      (no signup, no DNS, no credentials — fully automatic).
-#   2. Walks you through entering your Anthropic API key using the built-in wizard.
-#   3. Locks the model to Claude Sonnet 4.6 (so you can't accidentally burn
-#      credits on a bigger model).
+#   2. Walks you through entering your OpenAI API key using the built-in wizard.
+#   3. Locks the model to GPT-5-nano (cheap and good enough for the workshop;
+#      stops you from accidentally burning budget on a bigger model).
 #   4. Auto-approves the pairing request when you open the dashboard.
 #   5. Verifies everything and prints a final "all good" summary.
 #
@@ -15,13 +15,13 @@
 # does that for you).
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/<you>/<repo>/main/openclaw-student-setup.sh -o setup.sh
+#   curl -sSL https://raw.githubusercontent.com/CDAC-lab/BUS3006-Resources/main/openclaw-student-setup.sh -o setup.sh
 #   sudo bash setup.sh
 #
 # Optional environment variables:
 #   OPENCLAW_PORT      Local OpenClaw port (default: 18789)
 #   OPENCLAW_CONFIG    Config path (default: /root/.openclaw/openclaw.json)
-#   OPENCLAW_MODEL     Model to pin (default: anthropic/claude-sonnet-4-6)
+#   OPENCLAW_MODEL     Model to pin (default: openai/gpt-5-nano)
 #   PAIRING_TIMEOUT    Seconds to wait for browser pairing (default: 600)
 
 set -euo pipefail
@@ -43,7 +43,7 @@ fi
 
 OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
-OPENCLAW_MODEL="${OPENCLAW_MODEL:-anthropic/claude-sonnet-4-6}"
+OPENCLAW_MODEL="${OPENCLAW_MODEL:-openai/gpt-5-nano}"
 PAIRING_TIMEOUT="${PAIRING_TIMEOUT:-600}"
 
 # ---------------------------------------------------------------------------
@@ -76,6 +76,26 @@ echo ""
 echo "============================================================"
 echo "  STEP 2/7 - Installing Caddy (gives you a real HTTPS cert)"
 echo "============================================================"
+
+# The Kamatera image ships with nginx on ports 80/443 serving a
+# wildcard cert for *.au-sy-cloud-xip.com (that's what caused the
+# original "not private" browser warning). We have to evict it
+# before Caddy can bind.
+if systemctl is-active --quiet nginx 2>/dev/null; then
+    echo "  Stopping the pre-installed nginx (it's hogging ports 80/443)..."
+    systemctl stop nginx || true
+    systemctl disable nginx 2>/dev/null || true
+    echo "  nginx stopped and disabled."
+fi
+
+# Belt-and-suspenders: make sure nothing else is on 80/443 either.
+if ss -tln 2>/dev/null | grep -qE ':(80|443)\s'; then
+    echo ""
+    echo "WARNING: something else is still listening on port 80 or 443."
+    echo "         Caddy will fail to start. Run this to see what:"
+    echo "             ss -tlnp | grep -E ':(80|443)\\s'"
+fi
+
 apt-get update -qq
 apt-get install -y -qq debian-keyring debian-archive-keyring \
     apt-transport-https curl gnupg jq
@@ -138,17 +158,21 @@ echo "  Done. ${URL} should now serve HTTPS."
 cat <<EOF
 
 ============================================================
-  STEP 5/7 - Adding your Anthropic API key
+  STEP 5/7 - Adding your OpenAI API key
 ============================================================
 
 The OpenClaw wizard will launch next. Use these answers:
 
   Where will the Gateway run?    -> Local (this machine)
   Select sections to configure   -> Model
-  Model/auth provider            -> Anthropic
-  Anthropic auth method          -> Anthropic API key
-  Enter Anthropic API key        -> paste the key your
+  Model/auth provider            -> OpenAI
+  OpenAI auth method             -> OpenAI API key
+                                     (if asked; some wizard
+                                     versions skip straight
+                                     to the key prompt)
+  Enter OpenAI API key           -> paste the key your
                                      instructor gave you
+                                     (starts with sk-...)
   Models in the /model picker    -> just press Enter
                                      (this script will
                                      overwrite it anyway)
