@@ -5,9 +5,12 @@
 # What this does:
 #   1. Makes your OpenClaw dashboard reachable over HTTPS via sslip.io + Caddy
 #      (no signup, no DNS, no credentials — fully automatic).
-#   2. Walks you through entering your OpenAI API key using the built-in wizard.
-#   3. Locks the model to GPT-5-nano (cheap and good enough for the workshop;
-#      stops you from accidentally burning budget on a bigger model).
+#   2. Asks up front whether you're using the instructor's shared workshop
+#      key or your own OpenAI/Anthropic key, then walks you through the
+#      wizard with the right answers.
+#   3. For the instructor key, locks the model to GPT-5-nano so shared
+#      class budget is not accidentally burned on a bigger model.
+#      For your own key, respects whatever you picked in the wizard.
 #   4. Auto-approves the pairing request when you open the dashboard.
 #   5. Verifies everything and prints a final "all good" summary.
 #
@@ -21,7 +24,8 @@
 # Optional environment variables:
 #   OPENCLAW_PORT      Local OpenClaw port (default: 18789)
 #   OPENCLAW_CONFIG    Config path (default: /root/.openclaw/openclaw.json)
-#   OPENCLAW_MODEL     Model to pin (default: openai/gpt-5-nano)
+#   OPENCLAW_MODEL     Model to pin. Defaults to openai/gpt-5-nano for the
+#                      instructor key, and empty (no override) for own key.
 #   PAIRING_TIMEOUT    Seconds to wait for browser pairing (default: 600)
 
 set -euo pipefail
@@ -29,7 +33,6 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # sanity checks
 # ---------------------------------------------------------------------------
-
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: run this as root (or with sudo)."
     exit 1
@@ -43,13 +46,51 @@ fi
 
 OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
-OPENCLAW_MODEL="${OPENCLAW_MODEL:-openai/gpt-5-nano}"
 PAIRING_TIMEOUT="${PAIRING_TIMEOUT:-600}"
+
+# ---------------------------------------------------------------------------
+# key mode: instructor (locked to gpt-5-nano) or own (no override)
+# ---------------------------------------------------------------------------
+echo ""
+echo "============================================================"
+echo "  Which API key are you about to use?"
+echo "============================================================"
+echo "  Your own key  -> recommended. Pick any model you like."
+echo "                   OpenAI sk-... or Anthropic sk-ant-..."
+echo "  Workshop key  -> shared class key. Pinned to gpt-5-nano"
+echo "                   so the shared budget lasts the workshop."
+echo ""
+
+KEY_MODE=""
+while [[ -z "$KEY_MODE" ]]; do
+    read -rp "Are you using the instructor's workshop key? [y/N] " ans < /dev/tty
+    case "${ans,,}" in
+        y|yes)
+            KEY_MODE="instructor"
+            ;;
+        n|no|"")
+            KEY_MODE="own"
+            ;;
+        *)
+            echo "Please answer y or n."
+            ;;
+    esac
+done
+
+case "$KEY_MODE" in
+    instructor)
+        OPENCLAW_MODEL="${OPENCLAW_MODEL:-openai/gpt-5-nano}"
+        echo "  Mode: instructor key. Model will be locked to ${OPENCLAW_MODEL}."
+        ;;
+    own)
+        OPENCLAW_MODEL="${OPENCLAW_MODEL:-}"
+        echo "  Mode: own key. Whatever you pick in the wizard will stick."
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # step 1: detect public IP
 # ---------------------------------------------------------------------------
-
 echo ""
 echo "============================================================"
 echo "  STEP 1/7 - Finding your VPS's public IP address"
@@ -61,7 +102,6 @@ for service in ifconfig.co ifconfig.me icanhazip.com api.ipify.org; do
     IP=""
 done
 [[ -z "$IP" ]] && { echo "ERROR: couldn't detect your public IP."; exit 1; }
-
 HOSTNAME="${IP//./-}.sslip.io"
 URL="https://${HOSTNAME}"
 echo "  IP:       ${IP}"
@@ -71,7 +111,6 @@ echo "  Dashboard will live at: ${URL}"
 # ---------------------------------------------------------------------------
 # step 2: install Caddy + jq
 # ---------------------------------------------------------------------------
-
 echo ""
 echo "============================================================"
 echo "  STEP 2/7 - Installing Caddy (gives you a real HTTPS cert)"
@@ -114,12 +153,12 @@ ${HOSTNAME} {
     reverse_proxy 127.0.0.1:${OPENCLAW_PORT}
 }
 EOF
+
 echo "  Caddy installed and configured."
 
 # ---------------------------------------------------------------------------
 # step 3: allow the new URL inside OpenClaw
 # ---------------------------------------------------------------------------
-
 if [[ -f "$OPENCLAW_CONFIG" ]]; then
     echo ""
     echo "============================================================"
@@ -141,7 +180,6 @@ fi
 # ---------------------------------------------------------------------------
 # step 4: start Caddy -> Let's Encrypt cert
 # ---------------------------------------------------------------------------
-
 echo ""
 echo "============================================================"
 echo "  STEP 4/7 - Starting Caddy and getting a free HTTPS cert"
@@ -152,15 +190,15 @@ sleep 10
 echo "  Done. ${URL} should now serve HTTPS."
 
 # ---------------------------------------------------------------------------
-# step 5: Anthropic API key via the wizard
+# step 5: API key via the wizard (instructions branch by key mode)
 # ---------------------------------------------------------------------------
+echo ""
+echo "============================================================"
+echo "  STEP 5/7 - Adding your API key"
+echo "============================================================"
 
-cat <<EOF
-
-============================================================
-  STEP 5/7 - Adding your OpenAI API key
-============================================================
-
+if [[ "$KEY_MODE" == "instructor" ]]; then
+    cat <<EOF
 The OpenClaw wizard will launch next. Use these answers:
 
   Where will the Gateway run?    -> Local (this machine)
@@ -170,8 +208,8 @@ The OpenClaw wizard will launch next. Use these answers:
                                      (if asked; some wizard
                                      versions skip straight
                                      to the key prompt)
-  Enter OpenAI API key           -> paste the key your
-                                     instructor gave you
+  Enter OpenAI API key           -> paste the workshop key
+                                     your instructor gave you
                                      (starts with sk-...)
   Models in the /model picker    -> just press Enter
                                      (this script will
@@ -180,17 +218,46 @@ The OpenClaw wizard will launch next. Use these answers:
 
 Press Enter when you're ready to launch the wizard...
 EOF
+else
+    cat <<EOF
+The OpenClaw wizard will launch next. Use these answers:
+
+  Where will the Gateway run?    -> Local (this machine)
+  Select sections to configure   -> Model
+  Model/auth provider            -> OpenAI (for sk-... keys)
+                                     or Anthropic (for sk-ant-... keys)
+  Auth method                    -> API key (if asked)
+  Enter API key                  -> paste the key you created
+                                     in Step 5b of the workshop
+                                     doc
+  Models in the /model picker    -> type the model you want,
+                                     e.g.
+                                       OpenAI:    gpt-5
+                                                  gpt-5.1
+                                       Anthropic: claude-sonnet-4-6
+                                                  claude-opus-4-6
+  Select sections to configure   -> Continue
+
+This script will NOT overwrite your choice.
+
+Press Enter when you're ready to launch the wizard...
+EOF
+fi
+
 read -r _ < /dev/tty
 
 openclaw configure --section models < /dev/tty
 
 # ---------------------------------------------------------------------------
-# step 6: force the model to Sonnet 4.6 (no matter what was clicked)
+# step 6: lock the model (only if key mode says so)
 # ---------------------------------------------------------------------------
-
 echo ""
 echo "============================================================"
-echo "  STEP 6/7 - Locking the model to ${OPENCLAW_MODEL}"
+if [[ -n "$OPENCLAW_MODEL" ]]; then
+    echo "  STEP 6/7 - Locking the model to ${OPENCLAW_MODEL}"
+else
+    echo "  STEP 6/7 - Checking the model you configured"
+fi
 echo "============================================================"
 
 if [[ ! -f "$OPENCLAW_CONFIG" ]]; then
@@ -199,19 +266,22 @@ if [[ ! -f "$OPENCLAW_CONFIG" ]]; then
     exit 1
 fi
 
-tmp=$(mktemp)
-jq --arg m "$OPENCLAW_MODEL" '
-    .agents.defaults.models = {($m): {}} |
-    .agents.defaults.model.primary = $m |
-    .agents.defaults.model.fallbacks = []
-' "$OPENCLAW_CONFIG" > "$tmp" && mv "$tmp" "$OPENCLAW_CONFIG"
-echo "  Config updated."
-
-echo "  Restarting OpenClaw gateway..."
-openclaw gateway restart 2>/dev/null \
-    || systemctl --user restart openclaw-gateway 2>/dev/null \
-    || true
-sleep 3
+if [[ -n "$OPENCLAW_MODEL" ]]; then
+    tmp=$(mktemp)
+    jq --arg m "$OPENCLAW_MODEL" '
+        .agents.defaults.models = {($m): {}} |
+        .agents.defaults.model.primary = $m |
+        .agents.defaults.model.fallbacks = []
+    ' "$OPENCLAW_CONFIG" > "$tmp" && mv "$tmp" "$OPENCLAW_CONFIG"
+    echo "  Config updated."
+    echo "  Restarting OpenClaw gateway..."
+    openclaw gateway restart 2>/dev/null \
+        || systemctl --user restart openclaw-gateway 2>/dev/null \
+        || true
+    sleep 3
+else
+    echo "  Own-key mode. Leaving the wizard's model choice alone."
+fi
 
 # ---- verify the model settings actually stuck ----
 echo ""
@@ -220,25 +290,31 @@ PRIMARY=$(jq -r '.agents.defaults.model.primary // empty' "$OPENCLAW_CONFIG")
 ALLOWED=$(jq -r '.agents.defaults.models | keys | join(", ")' "$OPENCLAW_CONFIG")
 FALLBACKS=$(jq -r '.agents.defaults.model.fallbacks | if length == 0 then "(none)" else join(", ") end' "$OPENCLAW_CONFIG")
 
-echo "    Default model:  ${PRIMARY}"
-echo "    Allowed models: ${ALLOWED}"
+echo "    Default model:  ${PRIMARY:-(unset)}"
+echo "    Allowed models: ${ALLOWED:-(unset)}"
 echo "    Fallbacks:      ${FALLBACKS}"
 
-if [[ "$PRIMARY" == "$OPENCLAW_MODEL" ]]; then
-    echo "  [OK] Model is pinned to ${OPENCLAW_MODEL}."
+if [[ -n "$OPENCLAW_MODEL" ]]; then
+    if [[ "$PRIMARY" == "$OPENCLAW_MODEL" ]]; then
+        echo "  [OK] Model is pinned to ${OPENCLAW_MODEL}."
+    else
+        echo "  [!!] Model pin did not take. Expected ${OPENCLAW_MODEL}, got ${PRIMARY}."
+        echo "       Please tell your instructor before running any commands."
+    fi
 else
-    echo "  [!!] Model pin did not take. Expected ${OPENCLAW_MODEL}, got ${PRIMARY}."
-    echo "       Please tell your instructor before running any commands."
+    if [[ -n "$PRIMARY" ]]; then
+        echo "  [OK] Using your chosen model: ${PRIMARY}."
+    else
+        echo "  [!!] No model is set. Re-run 'openclaw configure --section models'."
+    fi
 fi
 
 # ---------------------------------------------------------------------------
 # step 7: print the URL and auto-approve pairing
 # ---------------------------------------------------------------------------
-
 # Pull the gateway token so we can print a one-click URL.
 TOKEN=""
 TOKEN=$(jq -r '.gateway.auth.token // empty' "$OPENCLAW_CONFIG" 2>/dev/null || true)
-
 if [[ -n "$TOKEN" ]]; then
     FULL_URL="${URL}/?token=${TOKEN}"
 else
@@ -250,7 +326,6 @@ cat <<EOF
 ============================================================
   STEP 7/7 - Open your dashboard and pair your browser
 ============================================================
-
 Your OpenClaw dashboard is ready at:
 
     ${FULL_URL}
@@ -272,7 +347,6 @@ EOF
 ELAPSED=0
 APPROVED_COUNT=0
 LAST_ANNOUNCE=0
-
 while [[ $ELAPSED -lt $PAIRING_TIMEOUT ]]; do
     PENDING_OUTPUT=$(openclaw devices list 2>&1 || true)
     PENDING_IDS=$(echo "$PENDING_OUTPUT" \
@@ -306,16 +380,21 @@ done
 # ---------------------------------------------------------------------------
 # final summary
 # ---------------------------------------------------------------------------
-
 echo ""
 echo "============================================================"
 echo "  ALL DONE"
 echo "============================================================"
 echo ""
 echo "Dashboard:      ${FULL_URL}"
-echo "Model (pinned): ${OPENCLAW_MODEL}"
+echo "Key mode:       ${KEY_MODE}"
+if [[ -n "$OPENCLAW_MODEL" ]]; then
+    echo "Model (pinned): ${OPENCLAW_MODEL}"
+else
+    echo "Model:          ${PRIMARY:-(unset)} (your choice, not overridden)"
+fi
 echo "Devices paired: ${APPROVED_COUNT}"
 echo ""
+
 if [[ $APPROVED_COUNT -eq 0 ]]; then
     cat <<EOF
 You didn't open the dashboard in time, but that's fine.
@@ -327,6 +406,7 @@ You can pair manually later with these commands:
 Or just re-run this script.
 EOF
 fi
+
 echo ""
 echo "Useful commands:"
 echo "    openclaw devices list                      # see paired browsers"
